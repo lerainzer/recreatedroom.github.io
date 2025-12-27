@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Recreated Room — UMP (WebXR)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html,body { margin:0; height:100%; background:#0b0f12; font-family:system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; color:#e6eef6; }
+    #overlay {
+      position: fixed; left: 16px; top: 16px; z-index: 20;
+      background: rgba(18,22,28,0.7); padding:12px 14px; border-radius:10px;
+      backdrop-filter: blur(6px); width: 340px; box-shadow: 0 6px 18px rgba(0,0,0,0.6);
+    }
+    #overlay .title { font-weight:700; font-size:16px; margin-bottom:6px; }
+    #overlay input, #overlay button, #overlay select { width:100%; margin-top:6px; padding:8px; border-radius:6px; border: none; background:#11161b; color:#e6eef6; }
+    #overlay button { cursor:pointer; background:#3b82f6; }
+    #log { margin-top:8px; font-size:12px; color:#9aa4af; min-height:28px; }
+    canvas { display:block; width:100%; height:100%; }
+    #footerDisclaimer {
+      position: fixed; left: 16px; bottom: 16px; z-index: 20; color:#9aa4af; font-size:12px;
+      background: rgba(10,12,14,0.6); padding:8px 10px; border-radius:8px;
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay" role="region" aria-label="Recreated Room controls">
+    <div class="title">Recreated Room — UMP</div>
+    <div>Target: high-res framebuffer, 60 Hz pacing. Use Quest Browser and enable WebXR.</div>
+    <button id="enterVR">Enter VR</button>
+
+    <div style="margin-top:10px; font-weight:600;">Multiplayer optional</div>
+    <input id="roomInput" placeholder="Room code (e.g., lobby)" />
+    <div style="display:flex; gap:8px; margin-top:6px;">
+      <button id="hostBtn" style="flex:1">Host</button>
+      <button id="joinBtn" style="flex:1">Join</button>
+    </div>
+
+    <div style="margin-top:10px; font-weight:600;">Controls</div>
+    <div style="font-size:13px; color:#cbd5e1; margin-top:6px;">
+      Left stick: Teleport · Right stick: Snap-turn · Trigger: Select · Grip: Pickup
+    </div>
+
+    <div id="log"></div>
+  </div>
+
+  <div id="footerDisclaimer">Recreated Room is a non‑commercial fan project. Not affiliated with or endorsed by any company.</div>
+
+  <!-- Three.js core -->
+  <script src="https://unpkg.com/three@0.158.0/build/three.min.js"></script>
+
+  <!-- Single merged module -->
+  <script type="module">
+    import { VRButton } from 'https://unpkg.com/three@0.158.0/examples/jsm/webxr/VRButton.js';
+
+    // ---------- UI helpers ----------
+    function log(msg) {
+      const el = document.getElementById('log');
+      if (el) el.textContent = msg;
+      console.log('[Recreated Room]', msg);
+    }
+
+    // ---------- Scene builder (merged) ----------
+    const SceneModule = (() => {
+      let scene, camera, playerRig;
+      const teleportTargets = [];
+
+      function buildScene() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0e1217);
+
+        camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 100);
+        camera.position.set(0, 1.6, 2);
+
+        playerRig = new THREE.Group();
+        playerRig.add(camera);
+        scene.add(playerRig);
+
+        // Lighting
+        const hemi = new THREE.HemisphereLight(0xffffff, 0x222b36, 0.9);
+        scene.add(hemi);
+        const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+        dir.position.set(3, 6, 2);
+        scene.add(dir);
+
+        buildRoom();
+        return { scene, camera, playerRig };
+      }
+
+      function buildRoom() {
+        const room = new THREE.Group();
+        scene.add(room);
+
+        const roomW = 8, roomD = 8, roomH = 3;
+
+        // Floor
+        const floorMat = new THREE.MeshStandardMaterial({ color: 0x2f3645, roughness: 1 });
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(roomW, roomD), floorMat);
+        floor.rotation.x = -Math.PI / 2;
+        floor.receiveShadow = true;
+        room.add(floor);
+
+        // Walls
+        const mats = [
+          new THREE.MeshStandardMaterial({ color: 0x48536b }),
+          new THREE.MeshStandardMaterial({ color: 0xf25c54 }),
+          new THREE.MeshStandardMaterial({ color: 0x66b8ff }),
+          new THREE.MeshStandardMaterial({ color: 0xffc857 })
+        ];
+        const thickness = 0.06;
+        const wallFront = new THREE.Mesh(new THREE.BoxGeometry(roomW, roomH, thickness), mats[1]);
+        wallFront.position.set(0, roomH/2, -roomD/2);
+        room.add(wallFront);
+
+        const wallBack = new THREE.Mesh(new THREE.BoxGeometry(roomW, roomH, thickness), mats[2]);
+        wallBack.position.set(0, roomH/2, roomD/2);
+        room.add(wallBack);
+
+        const wallLeft = new THREE.Mesh(new THREE.BoxGeometry(roomD, roomH, thickness), mats[0]);
+        wallLeft.rotation.y = Math.PI/2;
+        wallLeft.position.set(-roomW/2, roomH/2, 0);
+        room.add(wallLeft);
+
+        const wallRight = new THREE.Mesh(new THREE.BoxGeometry(roomD, roomH, thickness), mats[3]);
+        wallRight.rotation.y = Math.PI/2;
+        wallRight.position.set(roomW/2, roomH/2, 0);
+        room.add(wallRight);
+
+        // Table
+        const tableTop = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.08, 0.8),
+          new THREE.MeshStandardMaterial({ color: 0xd1d5db, roughness: 0.9 }));
+        tableTop.position.set(0, 0.75, 0);
+        room.add(tableTop);
+
+        // Board
+        const board = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.2, 0.06),
+          new THREE.MeshStandardMaterial({ color: 0x1f2937 }));
+        board.position.set(0, 1.6, -roomD/2 + 0.2);
+        room.add(board);
+
+        const title = makeTextSprite('Recreated Room (UMP)', 48, '#ffffff');
+        title.position.set(0, 2.1, -roomD/2 + 0.26);
+        room.add(title);
+
+        // Teleport pads
+        const spots = [
+          new THREE.Vector3(0, 0.01, 1.5),
+          new THREE.Vector3(-2, 0.01, -1.5),
+          new THREE.Vector3(2, 0.01, -1.5),
+          new THREE.Vector3(0, 0.01, -0.5)
+        ];
+        const padMat = new THREE.MeshStandardMaterial({ color: 0x3b82f6, emissive: 0x1e3a8a, emissiveIntensity: 0.6 });
+        for (const s of spots) {
+          const pad = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 0.02, 24), padMat);
+          pad.position.copy(s);
+          room.add(pad);
+          teleportTargets.push(pad);
+        }
+
+        // Spawn position
+        playerRig.position.set(0, 0, 2.2);
+      }
+
+      function makeTextSprite(text, size = 48, color = '#fff') {
+        const canvas = document.createElement('canvas');
+        canvas.width = 512; canvas.height = 256;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0,0,canvas.width,canvas.height);
+        ctx.fillStyle = color;
+        ctx.font = `${size}px system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, canvas.width/2, canvas.height/2);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        const mat = new THREE.SpriteMaterial({ map: tex });
+        const sprite = new THREE.Sprite(mat);
+        sprite.scale.set(1.4, 0.7, 1);
+        return sprite;
+      }
+
+      return { buildScene, getTeleportTargets: () => teleportTargets, makeTextSprite };
+    })();
+
+    // ---------- Locomotion module (merged) ----------
+    const LocomotionModule = (() => {
+      let rendererRef, cameraRef, rigRef;
+      let leftController, rightController;
+      let snapTurnCooldown = 0;
+
+      function setupLocomotion(renderer, camera, rig) {
+        rendererRef = renderer;
+        cameraRef = camera;
+        rigRef = rig;
+
+        leftController = renderer.xr.getController(0);
+        rightController = renderer.xr.getController(1);
+        rigRef.add(leftController);
+        rigRef.add(rightController);
+
+        // Simple ray visuals
+        const rayGeo = new THREE.CylinderGeometry(0.005, 0.005, 1.0, 8);
+        const rayMat = new THREE.MeshBasicMaterial({ color: 0x66b8ff });
+        const leftRay = new THREE.Mesh(rayGeo, rayMat); leftRay.rotation.x = Math.PI/2; leftRay.position.z = -0.5; leftController.add(leftRay);
+        const rightRay = new THREE.Mesh(rayGeo, rayMat); rightRay.rotation.x = Math.PI/2; rightRay.position.z = -0.5; rightController.add(rightRay);
+
+        leftController.addEventListener('selectstart', () => tryTeleport(leftController));
+        rightController.addEventListener('selectstart', () => tryTeleport(rightController));
+      }
+
+      function tryTeleport(controller) {
+        const targets = SceneModule.getTeleportTargets();
+        if (!targets || targets.length === 0) return;
+
+        // Cast forward from controller and pick nearest pad in front
+        const origin = new THREE.Vector3();
+        controller.localToWorld(origin.set(0,0,0));
+        const dir = new THREE.Vector3(0,0,-1).applyQuaternion(controller.quaternion);
+        const forward = new THREE.Ray(origin, dir);
+
+        let closest = null, minDist = Infinity;
+        for (const pad of targets) {
+          const toPad = new THREE.Vector3().subVectors(pad.position.clone().setY(0), rigRef.position.clone().setY(0));
+          const dist = toPad.length();
+          const camForward = new THREE.Vector3(0,0,-1).applyQuaternion(cameraRef.quaternion);
+          if (camForward.dot(toPad.normalize()) > 0.2 && dist < minDist && dist < 6) {
+            closest = pad; minDist = dist;
+          }
+        }
+        if (closest) {
+          rigRef.position.set(closest.position.x, rigRef.position.y, closest.position.z);
+          log('Teleported');
+        }
+      }
+
+      function handleGamepads(dt) {
+        const session = rendererRef.xr.getSession();
+        if (!session) return;
+
+        const inputSources = session.inputSources || [];
+        for (const src of inputSources) {
+          const gp = src.gamepad;
+          if (!gp) continue;
+
+          const lx = gp.axes?.[0] ?? 0;
+          const ly = gp.axes?.[1] ?? 0;
+          const rx = gp.axes?.[2] ?? 0;
+
+          // Teleport on strong forward push of left stick
+          if (ly < -0.85) tryTeleport(leftController);
+
+          // Snap turn on right stick X
+          if (Math.abs(rx) > 0.6 && snapTurnCooldown <= 0) {
+            const angle = rx > 0 ? -Math.PI/8 : Math.PI/8;
+            rigRef.rotation.y += angle;
+            snapTurnCooldown = 0.25;
+          }
+        }
+        snapTurnCooldown = Math.max(0, snapTurnCooldown - dt);
+      }
+
+      return { setupLocomotion, handleGamepads };
+    })();
+
+    // ---------- Multiplayer module (merged, optional) ----------
+    const MultiplayerModule = (() => {
+      // Replace with your WSS signaling endpoint to enable multiplayer
+      const SIGNAL_URL = "wss://YOUR-SIGNALING-WS-ENDPOINT";
+      let ws = null;
+      let room = null;
+      let myId = Math.random().toString(36).slice(2,8);
+      const peers = new Map();
+      const dataChannels = new Map();
+      const remoteAvatars = new Map();
+
+      function init() {
+        // expose id for debugging
+        window.__RECREATED_MY_ID = myId;
+      }
+
+      function broadcastState(globals) {
+        if (dataChannels.size === 0) return;
+        const pos = globals.playerRig.position;
+        const yaw = globals.playerRig.rotation.y;
+        const payload = JSON.stringify({ t: 'state', id: myId, x: pos.x, y: pos.y, z: pos.z, yaw, ts: Date.now() });
+        for (const dc of dataChannels.values()) {
+          if (dc.readyState === 'open') dc.send(payload);
+        }
+      }
+
+      function hostRoom(roomCode) {
+        if (!SIGNAL_URL.startsWith('wss')) { log('Set SIGNAL_URL to your wss endpoint to enable multiplayer.'); return; }
+        room = roomCode || 'lobby';
+        ws = new WebSocket(SIGNAL_URL);
+        ws.onopen = () => ws.send(JSON.stringify({ t: 'join', room, id: myId }));
+        ws.onmessage = async (ev) => {
+          const msg = JSON.parse(ev.data);
+          if (msg.t === 'peer-join' && msg.id !== myId) {
+            await createOffer(msg.id);
+          } else if (msg.t === 'answer') {
+            const pc = peers.get(msg.from);
+            if (pc) await pc.setRemoteDescription(msg.answer);
+          } else if (msg.t === 'candidate') {
+            const pc = peers.get(msg.from);
+            if (pc) await pc.addIceCandidate(msg.candidate);
+          }
+        };
+        log('Hosting room: ' + room);
+      }
+
+      function joinRoom(roomCode) {
+        if (!SIGNAL_URL.startsWith('wss')) { log('Set SIGNAL_URL to your wss endpoint to enable multiplayer.'); return; }
+        room = roomCode || 'lobby';
+        ws = new WebSocket(SIGNAL_URL);
+        ws.onopen = () => ws.send(JSON.stringify({ t: 'join', room, id: myId }));
+        ws.onmessage = async (ev) => {
+          const msg = JSON.parse(ev.data);
+          if (msg.t === 'offer' && msg.to === myId) {
+            await acceptOffer(msg.from, msg.offer);
+          } else if (msg.t === 'candidate') {
+            const pc = peers.get(msg.from);
+            if (pc) await pc.addIceCandidate(msg.candidate);
+          }
+        };
+        log('Joining room: ' + room);
+      }
+
+      async function createPeer(peerId) {
+        const pc = new RTCPeerConnection({ iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }] });
+        peers.set(peerId, pc);
+
+        pc.onicecandidate = (e) => {
+          if (e.candidate) ws?.send(JSON.stringify({ t: 'candidate', room, from: myId, to: peerId, candidate: e.candidate }));
+        };
+        pc.ondatachannel = (ev) => {
+          const dc = ev.channel;
+          dataChannels.set(peerId, dc);
+          dc.onmessage = (m) => receiveState(peerId, m.data);
+        };
+        return pc;
+      }
+
+      async function createOffer(peerId) {
+        const pc = await createPeer(peerId);
+        const dc = pc.createDataChannel('state');
+        dataChannels.set(peerId, dc);
+        dc.onmessage = (m) => receiveState(peerId, m.data);
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        ws?.send(JSON.stringify({ t: 'offer', room, from: myId, to: peerId, offer }));
+      }
+
+      async function acceptOffer(peerId, offer) {
+        const pc = await createPeer(peerId);
+        await pc.setRemoteDescription(offer);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        ws?.send(JSON.stringify({ t: 'answer', room, from: myId, to: peerId, answer }));
+      }
+
+      function receiveState(peerId, data) {
+        try {
+          const msg = JSON.parse(data);
+          if (msg.t !== 'state') return;
+          let avatar = remoteAvatars.get(peerId);
+          if (!avatar) {
+            avatar = createAvatarMesh(peerId);
+            remoteAvatars.set(peerId, avatar);
+            // add to scene if available
+            if (window.__RECREATED_SCENE) window.__RECREATED_SCENE.add(avatar);
+          }
+          avatar.position.set(msg.x, msg.y, msg.z);
+          avatar.rotation.set(0, msg.yaw, 0);
+        } catch (e) {}
+      }
+
+      function createAvatarMesh(id) {
+        const g = new THREE.Group();
+        const body = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.6, 0.25), new THREE.MeshStandardMaterial({ color: 0x3b82f6 }));
+        const head = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.3), new THREE.MeshStandardMaterial({ color: 0xf59e0b }));
+        body.position.set(0, 1.1, 0);
+        head.position.set(0, 1.45, 0);
+        g.add(body); g.add(head);
+        const label = makeTextSprite(id, 28, '#ffffff');
+        label.position.set(0, 1.8, 0);
+        g.add(label);
+        return g;
+      }
+
+      function makeTextSprite(text, size = 48, color = '#fff') {
+        const canvas = document.createElement('canvas');
+        canvas.width = 512; canvas.height = 256;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0,0,canvas.width,canvas.height);
+        ctx.fillStyle = color;
+        ctx.font = `${size}px system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, canvas.width/2, canvas.height/2);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        const mat = new THREE.SpriteMaterial({ map: tex });
+        const sprite = new THREE.Sprite(mat);
+        sprite.scale.set(1.4, 0.7, 1);
+        return sprite;
+      }
+
+      return { init, broadcastState, hostRoom, joinRoom };
+    })();
+
+    // ---------- App bootstrap (merged) ----------
+    (function App() {
+      let renderer, scene, camera, clock, playerRig;
+      let lastTime = performance.now();
+      let frameAccumulator = 0;
+      const targetHz = 60;
+
+      function initRenderer() {
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        renderer.xr.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // Try to nudge internal resolution for better clarity on Quest 3/3S
+        if (renderer.xr && typeof renderer.xr.setFramebufferScaleFactor === 'function') {
+          try { renderer.xr.setFramebufferScaleFactor(1.35); } catch (e) {}
+        }
+
+        window.addEventListener('resize', onResize);
+        onResize();
+
+        // expose renderer for debugging
+        window.__RECREATED_RENDERER = renderer;
+      }
+
+      function onResize() {
+        const w = window.innerWidth, h = window.innerHeight;
+        if (renderer) renderer.setSize(w, h, false);
+        if (camera) { camera.aspect = w / h; camera.updateProjectionMatrix(); }
+      }
+
+      async function init() {
+        initRenderer();
+
+        // Build scene
+        const built = SceneModule.buildScene();
+        scene = built.scene;
+        camera = built.camera;
+        playerRig = built.playerRig;
+
+        // Expose scene for multiplayer avatar insertion
+        window.__RECREATED_SCENE = scene;
+
+        clock = new THREE.Clock();
+
+        // Locomotion
+        LocomotionModule.setupLocomotion(renderer, camera, playerRig);
+
+        // Multiplayer
+        MultiplayerModule.init();
+
+        // UI wiring
+        setupUI(startXR);
+
+        log('Ready. Click Enter VR to start.');
+      }
+
+      function startXR() {
+        document.body.appendChild(VRButton.createButton(renderer));
+        renderer.setAnimationLoop(onXRFrame);
+        log('Entering VR session...');
+      }
+
+      function onXRFrame() {
+        const now = performance.now();
+        const dt = (now - lastTime) / 1000;
+        lastTime = now;
+
+        // Frame pacing toward ~60 Hz
+        const targetDelta = 1 / targetHz;
+        frameAccumulator += dt;
+        if (frameAccumulator < targetDelta * 0.9) return;
+        frameAccumulator = 0;
+
+        // Update inputs and locomotion
+        LocomotionModule.handleGamepads(dt);
+
+        // Render
+        renderer.render(scene, camera);
+
+        // Broadcast state occasionally
+        MultiplayerModule.broadcastState({ playerRig });
+      }
+
+      // UI wiring inside app so it can call multiplayer functions
+      function setupUI(startXRFunc) {
+        const enterBtn = document.getElementById('enterVR');
+        const hostBtn = document.getElementById('hostBtn');
+        const joinBtn = document.getElementById('joinBtn');
+        const roomInput = document.getElementById('roomInput');
+
+        enterBtn.addEventListener('click', () => startXRFunc());
+
+        hostBtn.addEventListener('click', () => {
+          const room = roomInput.value.trim() || 'lobby';
+          MultiplayerModule.hostRoom(room);
+        });
+
+        joinBtn.addEventListener('click', () => {
+          const room = roomInput.value.trim() || 'lobby';
+          MultiplayerModule.joinRoom(room);
+        });
+      }
+
+      init();
+    })();
+  </script>
+</body>
+</html>
